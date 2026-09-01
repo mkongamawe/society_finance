@@ -1,0 +1,22 @@
+services:
+  nocodb:
+    image: nocodb/nocodb:latest
+    container_name: society_nocodb
+    restart: unless-stopped
+
+    ports:
+      - "8082:8080"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    environment:
+      NC_ALLOW_LOCAL_EXTERNAL_DBS: "true"
+      NC_ALLOW_INTERNAL_HOSTS: "true"
+      NC_DB: "pg://host.docker.internal:5432?u=${POSTGRES_USER}&p=${POSTGRES_PASSWORD}&d=${POSTGRES_DB}&sslmode=disable"
+
+    volumes:
+      - society_nocodb_data:/usr/app/data/
+
+volumes:
+  society_nocodb_data:

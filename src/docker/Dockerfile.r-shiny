@@ -1,0 +1,36 @@
+FROM rocker/shiny:4.4.1
+
+
+# Get the required libpq5 library
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+    # install2.r is littler's installer, bundled in rocker images.
+# --skipinstalled avoids reinstalling base packages already present;
+# --ncpus -1 uses all available cores to compile faster.
+RUN install2.r --error --skipinstalled --ncpus -1 \
+      shinydashboard \
+      fresh \
+      DBI \
+      RPostgres \
+      dplyr \
+      DT \
+      plotly \
+      lubridate \
+      scales \
+      leaflet \
+    && rm -rf /tmp/downloaded_packages
+
+# Shiny Server serves any folder under /srv/shiny-server/ as an app
+# at http://<host>:3838/<folder-name>/
+COPY src/r/app/app.R /srv/shiny-server/church-dashboard/app.R
+COPY src/bash/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+WORKDIR /srv//shiny-server/church-dashboard
+
+EXPOSE 3838
+ 
+# This is already the default CMD in rocker/shiny, but explicit is nice:
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/usr/bin/shiny-server"]

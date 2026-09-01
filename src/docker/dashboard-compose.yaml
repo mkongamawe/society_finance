@@ -1,0 +1,21 @@
+services:
+  church-dashboard:
+    build:
+      context: ../..
+      dockerfile: src/docker/Dockerfile.r-shiny
+    container_name: church-dashboard
+    restart: unless-stopped
+    ports:
+      - "3840:3838"
+    volumes:
+      - ../../src/r/app:/srv/shiny-server/church-dashboard
+      - ../../logs/app_logs:/var/log/shiny-server
+    env_file:
+      - ../../.env
+    environment:
+      CHURCH_DB_HOST: host.docker.internal   # or your server's LAN/Tailscale IP
+      CHURCH_DB_PORT: "5432"
+      CHURCH_DB_NAME: society_finance
+      CHURCH_DB_USER: shiny_reader
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # needed on Linux; harmless elsewhere

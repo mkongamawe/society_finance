@@ -1,0 +1,8 @@
+# Ignore sensitive files
+.env
+logs/
+.private/
+src/sql/seed_data.sql
+
+# Ignore backup files
+*.bak
