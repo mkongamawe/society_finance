@@ -1,0 +1,11 @@
+{
+    "file_base_name": "report_jan26_aug26",
+    "period_label": "01 Jan 2026 -- 31 Aug 2026",
+    "table_rows": "Balance B/F (Bank) & 0.00 & \\textbf{Subtotal} & 0.00 \\\\ \nBalance B/F (Cash) & 0.00 &  &  \\\\ \nOffertory & 8,650.00 &  &  \\\\ \nShukrani & 1,000.00 &  &  \\\\ \nTithe & 3,000.00 &  &  \\\\ \n",
+    "closing_bank": "0.00",
+    "closing_cash": "12,650.00",
+    "total_sum": "12,650.00",
+    "offertory_summary_text": "Initial period of reporting.",
+    "tithe_summary_text": "Initial period of reporting.",
+    "report_gen_date": "01/09/2026"
+}

@@ -1,0 +1,25 @@
+{
+  "name": "latex-builder (dev)",
+  "dockerComposeFile": ["../docker-compose.dev.yaml"],
+  "service": "latex-builder",
+  "workspaceFolder": "/app",
+  "shutdownAction": "stopCompose",
+
+  // last stage in the chain — nothing downstream to co-start
+  "runServices": ["latex-builder"],
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "James-Yu.latex-workshop",
+        "ms-python.python",
+        "tomoki1207.pdf",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "latex-workshop.latex.autoBuild.run": "never",
+        "latex-workshop.view.pdf.viewer": "tab"
+      }
+    }
+  }
+}

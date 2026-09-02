@@ -1,0 +1,31 @@
+{
+  "name": "python-ledger (dev)",
+  "dockerComposeFile": ["../docker-compose.dev.yaml"],
+  "service": "python-ledger",
+  "workspaceFolder": "/app",
+  "shutdownAction": "stopCompose",
+
+  // keep both stages running so you can test the handoff to r-plotter
+  // while attached to python-ledger; VS Code only attaches to the
+  // service named above, "runServices" just starts these alongside it
+  "runServices": ["python-ledger", "r-plotter"],
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "mtxr.sqltools",
+        "mtxr.sqltools-driver-pg",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python3",
+        "python.terminal.activateEnvironment": false
+      }
+    }
+  },
+
+  "postCreateCommand": "pip install --user pytest ipython"
+}

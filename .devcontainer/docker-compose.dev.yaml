@@ -1,0 +1,49 @@
+# Dev-only compose file — parallels the production Dockerfiles in
+# src/docker/, but keeps each container alive for interactive VS Code
+# sessions instead of running once and exiting. Referenced by all three
+# .devcontainer/*/devcontainer.json files; not used in production.
+#
+# CMD override is deliberate: devcontainer.json's default behavior
+# (sleep infinity) needs the container to not exit immediately, since
+# the real Dockerfiles end in a one-shot CMD like
+# `python python_ledger.py`. Nothing about the Dockerfiles themselves
+# changes here — dev and prod images stay identical apart from this.
+
+services:
+  python-ledger:
+    build:
+      context: ..
+      dockerfile: src/docker/Dockerfile.python-ledger
+    command: sleep infinity
+    volumes:
+      - ..:/workspace
+      # - ../src/python:/app
+      - ../output:/data
+      - ../data:/app/data
+    env_file:
+      - ../.env
+    network_mode: host # matches production networking, needed to reach host Postgres
+
+  r-plotter:
+    build:
+      context: ..
+      dockerfile: ./src/docker/Dockerfile.r-plotter
+    command: sleep infinity
+    volumes:
+      - ..:/workspace
+      # - ../src/r:/app
+      - ../output:/data
+    depends_on:
+      - python-ledger
+
+  latex-builder:
+    build:
+      context: ..
+      dockerfile: ./src/docker/Dockerfile.latex-builder
+    command: sleep infinity
+    volumes:
+      - ..:/workspace
+      # - ../templates:/app/templates
+      - ../output:/data
+    depends_on:
+      - r-plotter

@@ -1,0 +1,4 @@
+date,transaction_type,category,description,account,amount,correct_amount
+2026-04-26,Income,Shukrani,Clement Nyiro Mwagwabi,Petty Cash / M-Pesa,1000.0,1000.0
+2026-08-01,Income,Tithe,Clement Nyiro Mwagwabi,Petty Cash / M-Pesa,3000.0,3000.0
+2026-08-23,Income,Offertory,,Petty Cash / M-Pesa,8650.0,8650.0

@@ -2,7 +2,7 @@
 .env
 logs/
 .private/
-src/sql/seed_data.sql
+src/sql/.private_seed_data.sql
 
 # Ignore backup files
 *.bak

@@ -1,0 +1,19 @@
+# Use a slim Python image
+FROM python:3.12-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies for psycopg2
+RUN apt-get update && apt-get install -y libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+
+# Install specific Python packages
+RUN pip install --no-cache-dir pandas sqlalchemy psycopg2-binary
+
+# Copy the script
+COPY src/python/python_ledger.py /app/python_ledger.py
+
+# Command to run the script (Arguments will be passed at runtime)
+CMD ["python", "/app/python_ledger.py"]
+# [ ]Changed for the dev container
+# ENTRYPOINT ["python", "/app/python_ledger.py"]

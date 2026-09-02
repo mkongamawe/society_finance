@@ -113,7 +113,7 @@ load_data <- function() {
     )
     on.exit(dbDisconnect(con))
 
-    ledger <- dbGetQuery(con, "SELECT * FROM general_ledger") %>%
+    ledger <- dbGetQuery(con, "SELECT * FROM general_ledger") |>
         mutate(
             entry_date = as.Date(entry_date),
             flow = ifelse(signed_amount >= 0, "income", "expense")
@@ -126,34 +126,39 @@ load_data <- function() {
         "SELECT name AS fund, description, is_restricted, is_active FROM funds"
     )
 
+    # ---- MEMBERS: added location_text and parsed lat/lng later ----
     members <- dbGetQuery(
         con,
         "
     SELECT
-      m.full_name, m.phone_number, m.gender, m.general_area,
-      m.location_status, m.member_status, m.is_active,
+      m.full_name, m.phone_number, g.label AS gender, m.general_area,
+      ls.label AS location_status, ms.label AS member_status, m.is_active,
       m.baptism_status, m.confirmation_status,
-      fg.name AS fellowship_group
+      fg.name AS fellowship_group,
+      m.location_text   -- new: semicolon-separated lat;lon
     FROM members m
+    LEFT JOIN genders g ON g.id = m.gender_id
+    LEFT JOIN member_statuses ms ON ms.id = m.member_status_id
+    LEFT JOIN location_statuses ls ON ls.id = m.location_status_id
     LEFT JOIN fellowship_groups fg ON fg.id = m.fellowship_group_id
     "
     )
 
-    # ST_Y/ST_X pull lat/lng back out of the PostGIS geography point so the
-    # rest of the app never has to think about geometry types.
+    # ---- VISITORS: added location_text and parsed lat/lng later ----
     visitors <- dbGetQuery(
         con,
         "
     SELECT
-      v.id, v.full_name, v.phone_number, v.gender, v.general_area,
-      v.location_status, v.how_heard, v.first_visit_date,
+      v.id, v.full_name, v.phone_number, g.label AS gender, v.general_area,
+      ls.label AS location_status, v.how_heard, v.first_visit_date,
       v.visitor_status, v.converted_at, m.full_name AS invited_by,
-      ST_Y(v.location::geometry) AS lat,
-      ST_X(v.location::geometry) AS lng
+      v.location_text
     FROM visitors v
+    LEFT JOIN genders g ON g.id = v.gender_id
+    LEFT JOIN location_statuses ls ON ls.id = v.location_status_id
     LEFT JOIN members m ON m.id = v.invited_by_member_id
     "
-    ) %>%
+    ) |>
         mutate(first_visit_date = as.Date(first_visit_date))
 
     visitor_visits <- dbGetQuery(
@@ -163,7 +168,7 @@ load_data <- function() {
     FROM visitor_visits vv
     LEFT JOIN fellowship_groups fg ON fg.id = vv.fellowship_group_id
     "
-    ) %>%
+    ) |>
         mutate(visit_date = as.Date(visit_date))
 
     list(
@@ -241,6 +246,13 @@ ui <- dashboardPage(
                         tabPanel(
                             "Expenses by Category",
                             plotlyOutput("category_chart", height = "420px")
+                        ),
+                        tabPanel(
+                            'Income by category',
+                            plotlyOutput(
+                                'category_chart_income',
+                                height = '420px'
+                            )
                         )
                     )
                 )
@@ -259,7 +271,7 @@ ui <- dashboardPage(
                         "Ledger",
                         checkboxInput(
                             "show_voided",
-                            "Show voided entries",
+                            "Show voided entries (reversal rows)",
                             value = FALSE
                         ),
                         DTOutput("ledger_table")
@@ -311,6 +323,7 @@ ui <- dashboardPage(
 
             ## ---- MEMBERS ----
             ## Demographics only: who the congregation is, not what they give.
+            ## Added a map tab using location_text.
             tabItem(
                 tabName = "members",
                 fluidRow(
@@ -322,7 +335,7 @@ ui <- dashboardPage(
                 fluidRow(
                     tabBox(
                         width = 12,
-                        height = "560px",
+                        height = "640px",
                         tabPanel(
                             "Status Breakdown",
                             plotlyOutput("member_status_pie", height = "480px")
@@ -334,6 +347,11 @@ ui <- dashboardPage(
                         tabPanel(
                             "Member Roster",
                             DTOutput("members_table")
+                        ),
+                        tabPanel(
+                            # NEW: Member Map
+                            "Member Map",
+                            leafletOutput("member_map", height = "560px")
                         )
                     )
                 )
@@ -391,16 +409,38 @@ server <- function(input, output, session) {
     raw <- reactiveVal(load_data())
     observeEvent(input$refresh, raw(load_data()))
 
+    # ---- Ledger data with void filtering: now uses is_reversal ----
     ledger_in_range <- reactive({
-        df <- raw()$ledger %>%
+        df <- raw()$ledger |>
             filter(
                 entry_date >= input$date_range[1],
                 entry_date <= input$date_range[2]
             )
+        # Hide reversal rows unless "Show voided" is checked
         if (!isTRUE(input$show_voided)) {
-            df <- df %>% filter(!is_voided)
+            df <- df |> filter(!is_reversal) # was !is_voided
         }
         df
+    })
+
+    # ---- Members data with location_text parsed ----
+    members_with_coords <- reactive({
+        raw()$members |>
+            mutate(
+                # Parse "lat;lon" from location_text
+                lat = as.numeric(sapply(strsplit(location_text, ";"), `[`, 1)),
+                lng = as.numeric(sapply(strsplit(location_text, ";"), `[`, 2))
+            )
+    })
+
+    # ---- Visitors data with location_text parsed ----
+    visitors_with_coords <- reactive({
+        raw()$visitors |>
+            mutate(
+                # Parse "lat;lon" from location_text
+                lat = as.numeric(sapply(strsplit(location_text, ";"), `[`, 1)),
+                lng = as.numeric(sapply(strsplit(location_text, ";"), `[`, 2))
+            )
     })
 
     ## ==================== OVERVIEW ====================
@@ -433,9 +473,9 @@ server <- function(input, output, session) {
     })
 
     output$total_income <- renderValueBox({
-        v <- ledger_in_range() %>%
-            filter(entry_type == "transaction", flow == "income") %>%
-            pull(signed_amount) %>%
+        v <- ledger_in_range() |>
+            filter(entry_type == "transaction", flow == "income") |>
+            pull(signed_amount) |>
             sum(na.rm = TRUE)
         valueBox(
             dollar(v, prefix = "KES "),
@@ -446,10 +486,10 @@ server <- function(input, output, session) {
     })
 
     output$total_expense <- renderValueBox({
-        v <- ledger_in_range() %>%
-            filter(entry_type == "transaction", flow == "expense") %>%
-            pull(signed_amount) %>%
-            sum(na.rm = TRUE) %>%
+        v <- ledger_in_range() |>
+            filter(entry_type == "transaction", flow == "expense") |>
+            pull(signed_amount) |>
+            sum(na.rm = TRUE) |>
             abs()
         valueBox(
             dollar(v, prefix = "KES "),
@@ -460,9 +500,9 @@ server <- function(input, output, session) {
     })
 
     output$net_balance <- renderValueBox({
-        v <- ledger_in_range() %>%
-            filter(entry_type == "transaction") %>%
-            pull(signed_amount) %>%
+        v <- ledger_in_range() |>
+            filter(entry_type == "transaction") |>
+            pull(signed_amount) |>
             sum(na.rm = TRUE)
         valueBox(
             dollar(v, prefix = "KES "),
@@ -473,10 +513,10 @@ server <- function(input, output, session) {
     })
 
     output$monthly_chart <- renderPlotly({
-        monthly <- ledger_in_range() %>%
-            filter(entry_type == "transaction") %>%
-            mutate(month = floor_date(entry_date, "month")) %>%
-            group_by(month, flow) %>%
+        monthly <- ledger_in_range() |>
+            filter(entry_type == "transaction") |>
+            mutate(month = floor_date(entry_date, "month")) |>
+            group_by(month, flow) |>
             summarise(total = sum(abs(signed_amount)), .groups = "drop")
 
         p <- ggplot2::ggplot(
@@ -497,10 +537,10 @@ server <- function(input, output, session) {
     })
 
     output$category_chart <- renderPlotly({
-        by_cat <- ledger_in_range() %>%
-            filter(entry_type == "transaction", flow == "expense") %>%
-            group_by(category_name) %>%
-            summarise(total = sum(abs(signed_amount)), .groups = "drop") %>%
+        by_cat <- ledger_in_range() |>
+            filter(entry_type == "transaction", flow == "expense") |>
+            group_by(category_name) |>
+            summarise(total = sum(abs(signed_amount)), .groups = "drop") |>
             arrange(desc(total))
 
         plot_ly(
@@ -518,14 +558,40 @@ server <- function(input, output, session) {
                 ))
             ),
             textinfo = "label+percent"
-        ) %>%
+        ) |>
+            layout(showlegend = FALSE)
+    })
+
+    output$category_chart_income <- renderPlotly({
+        by_cat <- ledger_in_range() |>
+            filter(entry_type == "transaction", flow == "income") |>
+            group_by(category_name) |>
+            summarise(total = sum(abs(signed_amount)), .groups = "drop") |>
+            arrange(desc(total))
+
+        plot_ly(
+            by_cat,
+            labels = ~category_name,
+            values = ~total,
+            type = "pie",
+            marker = list(
+                colors = colorRampPalette(c(
+                    "#2C3E50",
+                    "#B33A3A",
+                    "#D98E04"
+                ))(nrow(
+                    by_cat
+                ))
+            ),
+            textinfo = "label+percent"
+        ) |>
             layout(showlegend = FALSE)
     })
 
     ## ==================== GENERAL LEDGER ====================
 
     output$ledger_table <- renderDT({
-        ledger_in_range() %>%
+        ledger_in_range() |>
             select(
                 entry_date,
                 entry_type,
@@ -536,14 +602,16 @@ server <- function(input, output, session) {
                 signed_amount,
                 description,
                 entered_by_name,
-                is_voided
-            ) %>%
-            arrange(desc(entry_date)) %>%
+                is_reversal, # new: TRUE if this row cancels a previous transaction
+                voids_entry_date, # date of the original voided entry (if reversal)
+                voided_reason # reason for voiding (if reversal)
+            ) |>
+            arrange(desc(entry_date)) |>
             datatable(
                 filter = "top",
                 options = list(pageLength = 20),
                 rownames = FALSE
-            ) %>%
+            ) |>
             formatCurrency("signed_amount", currency = "KES ")
     })
 
@@ -551,33 +619,34 @@ server <- function(input, output, session) {
     # list so members who haven't given anything (yet) still show up with
     # a zero, rather than silently disappearing from the table.
     member_contributions <- reactive({
-        contributions <- raw()$ledger %>%
+        contributions <- raw()$ledger |>
             filter(
                 entry_type == "transaction",
-                !is_voided,
+                !is_reversal, # was !is_voided
                 flow == "income",
                 !is.na(member_name)
-            ) %>%
-            group_by(full_name = member_name) %>%
+            ) |>
+            group_by(full_name = member_name) |>
             summarise(
                 total_contributed = sum(signed_amount),
                 last_contribution = max(entry_date),
                 .groups = "drop"
             )
 
-        raw()$members %>%
-            left_join(contributions, by = "full_name") %>%
+        raw()$members |>
+            left_join(contributions, by = "full_name") |>
             mutate(total_contributed = coalesce(total_contributed, 0))
     })
 
     output$period_contributions <- renderValueBox({
-        v <- ledger_in_range() %>%
+        v <- ledger_in_range() |>
             filter(
                 entry_type == "transaction",
                 flow == "income",
+                !is_reversal, # was !is_voided
                 !is.na(member_name)
-            ) %>%
-            pull(signed_amount) %>%
+            ) |>
+            pull(signed_amount) |>
             sum(na.rm = TRUE)
         valueBox(
             dollar(v, prefix = "KES "),
@@ -588,13 +657,14 @@ server <- function(input, output, session) {
     })
 
     output$contributing_members <- renderValueBox({
-        v <- ledger_in_range() %>%
+        v <- ledger_in_range() |>
             filter(
                 entry_type == "transaction",
                 flow == "income",
+                !is_reversal, # was !is_voided
                 !is.na(member_name)
-            ) %>%
-            distinct(member_name) %>%
+            ) |>
+            distinct(member_name) |>
             nrow()
         valueBox(
             v,
@@ -605,10 +675,11 @@ server <- function(input, output, session) {
     })
 
     output$avg_contribution <- renderValueBox({
-        df <- ledger_in_range() %>%
+        df <- ledger_in_range() |>
             filter(
                 entry_type == "transaction",
                 flow == "income",
+                !is_reversal, # was !is_voided
                 !is.na(member_name)
             )
         v <- if (nrow(df) > 0) mean(df$signed_amount) else 0
@@ -621,9 +692,9 @@ server <- function(input, output, session) {
     })
 
     output$contribution_status_chart <- renderPlotly({
-        by_status <- member_contributions() %>%
-            filter(is_active) %>%
-            group_by(member_status) %>%
+        by_status <- member_contributions() |>
+            filter(is_active) |>
+            group_by(member_status) |>
             summarise(total = sum(total_contributed), .groups = "drop")
 
         p <- ggplot2::ggplot(
@@ -643,7 +714,7 @@ server <- function(input, output, session) {
     })
 
     output$members_contributions_table <- renderDT({
-        member_contributions() %>%
+        member_contributions() |>
             select(
                 full_name,
                 phone_number,
@@ -651,13 +722,13 @@ server <- function(input, output, session) {
                 gender,
                 total_contributed,
                 last_contribution
-            ) %>%
-            arrange(desc(total_contributed)) %>%
+            ) |>
+            arrange(desc(total_contributed)) |>
             datatable(
                 filter = "top",
                 options = list(pageLength = 15),
                 rownames = FALSE
-            ) %>%
+            ) |>
             formatCurrency("total_contributed", currency = "KES ")
     })
 
@@ -668,20 +739,20 @@ server <- function(input, output, session) {
     # the date range, for "how has this fund moved lately".
 
     fund_balances <- reactive({
-        raw()$ledger %>%
+        raw()$ledger |>
             filter(
                 entry_type == "transaction",
-                !is_voided,
+                !is_reversal, # was !is_voided
                 !is.na(fund_name)
-            ) %>%
-            group_by(fund = fund_name) %>%
-            summarise(balance = sum(signed_amount), .groups = "drop") %>%
-            right_join(raw()$funds_meta, by = "fund") %>%
+            ) |>
+            group_by(fund = fund_name) |>
+            summarise(balance = sum(signed_amount), .groups = "drop") |>
+            right_join(raw()$funds_meta, by = "fund") |>
             mutate(balance = coalesce(balance, 0))
     })
 
     output$fund_boxes <- renderUI({
-        fb <- fund_balances() %>% filter(is_active)
+        fb <- fund_balances() |> filter(is_active)
         boxes <- lapply(seq_len(nrow(fb)), function(i) {
             row <- fb[i, ]
             valueBox(
@@ -699,9 +770,9 @@ server <- function(input, output, session) {
     })
 
     output$fund_chart <- renderPlotly({
-        fd <- ledger_in_range() %>%
-            filter(entry_type == "transaction", !is.na(fund_name)) %>%
-            group_by(fund_name, flow) %>%
+        fd <- ledger_in_range() |>
+            filter(entry_type == "transaction", !is.na(fund_name)) |>
+            group_by(fund_name, flow) |>
             summarise(total = sum(abs(signed_amount)), .groups = "drop")
 
         p <- ggplot2::ggplot(
@@ -725,19 +796,20 @@ server <- function(input, output, session) {
     })
 
     output$fund_summary_table <- renderDT({
-        fund_balances() %>%
-            select(fund, is_restricted, is_active, balance, description) %>%
-            arrange(desc(balance)) %>%
+        fund_balances() |>
+            select(fund, is_restricted, is_active, balance, description) |>
+            arrange(desc(balance)) |>
             datatable(
                 options = list(pageLength = 10, dom = "tp"),
                 rownames = FALSE
-            ) %>%
+            ) |>
             formatCurrency("balance", currency = "KES ")
     })
 
     ## ==================== MEMBERS ====================
     # Demographics only — no money here. See General Ledger > Member
     # Contributions for giving history.
+    # Added map using location_text.
 
     output$total_members <- renderValueBox({
         valueBox(
@@ -769,8 +841,8 @@ server <- function(input, output, session) {
     })
 
     output$member_status_pie <- renderPlotly({
-        by_status <- raw()$members %>%
-            filter(is_active) %>%
+        by_status <- raw()$members |>
+            filter(is_active) |>
             count(member_status)
 
         plot_ly(
@@ -780,13 +852,13 @@ server <- function(input, output, session) {
             type = "pie",
             marker = list(colors = STATUS_COLORS[by_status$member_status]),
             textinfo = "label+percent"
-        ) %>%
+        ) |>
             layout(showlegend = FALSE)
     })
 
     output$member_gender_pie <- renderPlotly({
-        by_gender <- raw()$members %>%
-            filter(is_active) %>%
+        by_gender <- raw()$members |>
+            filter(is_active) |>
             count(gender)
 
         plot_ly(
@@ -796,12 +868,12 @@ server <- function(input, output, session) {
             type = "pie",
             marker = list(colors = GENDER_COLORS[by_gender$gender]),
             textinfo = "label+percent"
-        ) %>%
+        ) |>
             layout(showlegend = FALSE)
     })
 
     output$members_table <- renderDT({
-        raw()$members %>%
+        raw()$members |>
             select(
                 full_name,
                 phone_number,
@@ -812,12 +884,85 @@ server <- function(input, output, session) {
                 baptism_status,
                 confirmation_status,
                 is_active
-            ) %>%
-            arrange(full_name) %>%
+            ) |>
+            arrange(full_name) |>
             datatable(
                 filter = "top",
                 options = list(pageLength = 15),
                 rownames = FALSE
+            )
+    })
+
+    # ---- NEW: Member Map ----
+    output$member_map <- renderLeaflet({
+        m <- members_with_coords() |>
+            filter(!is.na(lat), !is.na(lng))
+
+        # use same colour palette as member status pie
+        status_colors <- setNames(
+            c("#3B6E9E", "#2E8B57", "#D98E04"),
+            c("Student", "Working", "Retired")
+        )
+        pal <- colorFactor(
+            status_colors,
+            domain = names(status_colors)
+        )
+
+        map <- leaflet()
+
+        if (nchar(CARTO_KEY) > 0) {
+            map <- map |>
+                addTiles(
+                    urlTemplate = paste0(
+                        "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=",
+                        CARTO_KEY
+                    ),
+                    attribution = paste(
+                        "&copy;",
+                        '<a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>,',
+                        '&copy; <a href="https://carto.com/attributions">CARTO</a>'
+                    ),
+                    options = tileOptions(subdomains = "abcd", maxZoom = 20)
+                )
+        } else {
+            map <- map |> addProviderTiles("Esri.WorldGrayCanvas")
+        }
+
+        map <- map |>
+            addLegend(
+                "bottomright",
+                pal = pal,
+                values = names(status_colors),
+                title = "Status"
+            )
+
+        if (nrow(m) == 0) {
+            return(
+                map |> setView(lng = 39.850317, lat = -3.627606, zoom = 15)
+            )
+        }
+
+        map |>
+            addCircleMarkers(
+                data = m,
+                lng = ~lng,
+                lat = ~lat,
+                radius = 6,
+                color = ~ pal(member_status),
+                stroke = FALSE,
+                fillOpacity = 0.85,
+                popup = ~ paste0(
+                    "<b>",
+                    full_name,
+                    "</b><br>",
+                    general_area,
+                    "<br>",
+                    "Status: ",
+                    member_status,
+                    "<br>",
+                    "Gender: ",
+                    gender
+                )
             )
     })
 
@@ -856,8 +1001,8 @@ server <- function(input, output, session) {
     })
 
     output$visitors_trend_chart <- renderPlotly({
-        monthly <- raw()$visitors %>%
-            mutate(month = floor_date(first_visit_date, "month")) %>%
+        monthly <- raw()$visitors |>
+            mutate(month = floor_date(first_visit_date, "month")) |>
             count(month, name = "new_visitors")
 
         p <- ggplot2::ggplot(
@@ -879,7 +1024,7 @@ server <- function(input, output, session) {
     })
 
     output$visitor_status_pie <- renderPlotly({
-        by_status <- raw()$visitors %>% count(visitor_status)
+        by_status <- raw()$visitors |> count(visitor_status)
 
         plot_ly(
             by_status,
@@ -891,13 +1036,13 @@ server <- function(input, output, session) {
                 colors = VISITOR_STATUS_COLORS[by_status$visitor_status]
             ),
             textinfo = "label+percent"
-        ) %>%
+        ) |>
             layout(showlegend = FALSE)
     })
 
     output$how_heard_chart <- renderPlotly({
-        by_heard <- raw()$visitors %>%
-            count(how_heard) %>%
+        by_heard <- raw()$visitors |>
+            count(how_heard) |>
             arrange(n)
 
         p <- ggplot2::ggplot(
@@ -913,7 +1058,7 @@ server <- function(input, output, session) {
     })
 
     output$visitor_gender_pie <- renderPlotly({
-        by_gender <- raw()$visitors %>% count(gender)
+        by_gender <- raw()$visitors |> count(gender)
 
         plot_ly(
             by_gender,
@@ -922,12 +1067,14 @@ server <- function(input, output, session) {
             type = "pie",
             marker = list(colors = GENDER_COLORS[by_gender$gender]),
             textinfo = "label+percent"
-        ) %>%
+        ) |>
             layout(showlegend = FALSE)
     })
 
     output$visitor_map <- renderLeaflet({
-        v <- raw()$visitors %>% filter(!is.na(lat), !is.na(lng))
+        v <- visitors_with_coords() |>
+            filter(!is.na(lat), !is.na(lng))
+
         pal <- colorFactor(
             VISITOR_STATUS_COLORS,
             domain = names(
@@ -938,9 +1085,7 @@ server <- function(input, output, session) {
         map <- leaflet()
 
         if (nchar(CARTO_KEY) > 0) {
-            # addProviderTiles() has no slot for a query-string key, so the
-            # CARTO tile URL is built by hand instead.
-            map <- map %>%
+            map <- map |>
                 addTiles(
                     urlTemplate = paste0(
                         "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=",
@@ -954,12 +1099,10 @@ server <- function(input, output, session) {
                     options = tileOptions(subdomains = "abcd", maxZoom = 20)
                 )
         } else {
-            # No key configured — fall back to a basemap that's never needed one,
-            # rather than showing the "API key required" watermark.
-            map <- map %>% addProviderTiles("Esri.WorldGrayCanvas")
+            map <- map |> addProviderTiles("Esri.WorldGrayCanvas")
         }
 
-        map <- map %>%
+        map <- map |>
             addLegend(
                 "bottomright",
                 pal = pal,
@@ -969,11 +1112,11 @@ server <- function(input, output, session) {
 
         if (nrow(v) == 0) {
             return(
-                map %>% setView(lng = 39.850317, lat = -3.627606, zoom = 15)
+                map |> setView(lng = 39.850317, lat = -3.627606, zoom = 15)
             )
         }
 
-        map %>%
+        map |>
             addCircleMarkers(
                 data = v,
                 lng = ~lng,
@@ -996,7 +1139,7 @@ server <- function(input, output, session) {
     })
 
     output$visitors_table <- renderDT({
-        raw()$visitors %>%
+        raw()$visitors |>
             select(
                 full_name,
                 phone_number,
@@ -1006,8 +1149,8 @@ server <- function(input, output, session) {
                 first_visit_date,
                 visitor_status,
                 invited_by
-            ) %>%
-            arrange(desc(first_visit_date)) %>%
+            ) |>
+            arrange(desc(first_visit_date)) |>
             datatable(
                 filter = "top",
                 options = list(pageLength = 15),

@@ -1,0 +1,27 @@
+{
+  "name": "r-plotter (dev)",
+  "dockerComposeFile": ["../docker-compose.dev.yaml"],
+  "service": "r-plotter",
+  "workspaceFolder": "/app",
+  "shutdownAction": "stopCompose",
+
+  // start latex-builder alongside so you can test r-plotter's PNG output
+  // actually being picked up downstream without leaving this window
+  "runServices": ["r-plotter", "latex-builder"],
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "REditorSupport.r",
+        "RDebugger.r-debugger",
+        "mtxr.sqltools",
+        "mtxr.sqltools-driver-pg"
+      ],
+      "settings": {
+        "r.rterm.linux": "/usr/local/bin/R",
+        "r.bracketedPaste": true,
+        "r.plot.useHttpgd": true
+      }
+    }
+  }
+}

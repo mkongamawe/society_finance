@@ -1,0 +1,26 @@
+# Use a slim Debian base
+FROM debian:bookworm-slim
+
+# Install R core and pre-compiled CRAN packages directly via APT
+# --no-install-recommends prevents pulling in unnecessary Linux utilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    r-base-core \
+    r-cran-ggplot2 \
+    r-cran-dplyr \
+    r-cran-readr \
+    r-cran-lubridate \
+    r-cran-tidyr \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy the plotting script
+COPY src/r/plotter.R /app/plotter.R
+
+# Run the script, accepting arguments
+CMD ["Rscript", "/app/plotter.R"]
+# [ ] Changed for the devcontainer
+
+# ENTRYPOINT ["Rscript", "/app/plotter.R"]
