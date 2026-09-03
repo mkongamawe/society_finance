@@ -24,6 +24,7 @@ library(plotly)
 library(lubridate)
 library(scales)
 library(leaflet)
+library(leaflet.extras2) # provides addEasyprint() for the on-map "export as image" control
 
 ## ---- CONFIG ---------------------------------------------------------
 DB_HOST <- Sys.getenv("CHURCH_DB_HOST", "localhost")
@@ -98,6 +99,21 @@ VISITOR_STATUS_COLORS <- c(
     lapsed = "#B33A3A"
 )
 
+## ---- UI HELPER: a consistently-styled download button ------------------
+## Used on every tab so "download what I'm looking at" always looks and
+## behaves the same way.
+download_btn <- function(id, label = "Download data") {
+    div(
+        class = "download-row",
+        downloadButton(
+            id,
+            label = label,
+            icon = icon("download"),
+            class = "btn-download-pretty"
+        )
+    )
+}
+
 ## ---- DATA LOADING ------------------------------------------------------
 # One connection per refresh, closed immediately after — fine for a
 # low-traffic single-user dashboard.
@@ -116,7 +132,11 @@ load_data <- function() {
     ledger <- dbGetQuery(con, "SELECT * FROM general_ledger") |>
         mutate(
             entry_date = as.Date(entry_date),
-            flow = ifelse(signed_amount >= 0, "income", "expense")
+            flow = case_when(
+                category_type == "income" ~ "income",
+                category_type == "expense" ~ "expense",
+                TRUE ~ "transfer"
+            )
         )
 
     balances <- dbGetQuery(con, "SELECT * FROM account_balances")
@@ -188,15 +208,27 @@ ui <- dashboardPage(
 
     dashboardSidebar(
         sidebarMenu(
-            menuItem(
+            shinydashboard::menuItem(
                 "Overview",
                 tabName = "overview",
                 icon = icon("gauge-high")
             ),
-            menuItem("General Ledger", tabName = "ledger", icon = icon("book")),
-            menuItem("Funds", tabName = "funds", icon = icon("layer-group")),
-            menuItem("Members", tabName = "members", icon = icon("users")),
-            menuItem(
+            shinydashboard::menuItem(
+                "General Ledger",
+                tabName = "ledger",
+                icon = icon("book")
+            ),
+            shinydashboard::menuItem(
+                "Funds",
+                tabName = "funds",
+                icon = icon("layer-group")
+            ),
+            shinydashboard::menuItem(
+                "Members",
+                tabName = "members",
+                icon = icon("users")
+            ),
+            shinydashboard::menuItem(
                 "Visitors",
                 tabName = "visitors",
                 icon = icon("person-walking-arrow-right")
@@ -222,6 +254,29 @@ ui <- dashboardPage(
             "
       .box { border-top: 3px solid #2C3E50; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
       .small-box { box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+
+      .btn-download-pretty {
+        background: linear-gradient(135deg, #2E8B57, #3B6E9E);
+        color: #ffffff !important;
+        border: none;
+        border-radius: 999px;
+        padding: 7px 18px;
+        font-weight: 600;
+        font-size: 13px;
+        letter-spacing: 0.2px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+        transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+      }
+      .btn-download-pretty:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+        color: #ffffff !important;
+        opacity: 0.95;
+      }
+      .download-row {
+        text-align: right;
+        margin-bottom: 12px;
+      }
     "
         ))),
 
@@ -229,6 +284,7 @@ ui <- dashboardPage(
             ## ---- OVERVIEW ----
             tabItem(
                 tabName = "overview",
+                download_btn("dl_overview", "Download transactions (period)"),
                 fluidRow(uiOutput("balance_boxes")),
                 fluidRow(
                     valueBoxOutput("total_income"),
@@ -274,10 +330,15 @@ ui <- dashboardPage(
                             "Show voided entries (reversal rows)",
                             value = FALSE
                         ),
+                        download_btn("dl_ledger", "Download ledger"),
                         DTOutput("ledger_table")
                     ),
                     tabPanel(
                         "Member Contributions",
+                        download_btn(
+                            "dl_contributions",
+                            "Download contributions"
+                        ),
                         fluidRow(
                             valueBoxOutput("period_contributions"),
                             valueBoxOutput("contributing_members"),
@@ -307,6 +368,7 @@ ui <- dashboardPage(
             ## ---- FUNDS ----
             tabItem(
                 tabName = "funds",
+                download_btn("dl_funds", "Download fund summary"),
                 fluidRow(uiOutput("fund_boxes")),
                 fluidRow(
                     tabBox(
@@ -326,6 +388,7 @@ ui <- dashboardPage(
             ## Added a map tab using location_text.
             tabItem(
                 tabName = "members",
+                download_btn("dl_members", "Download member roster"),
                 fluidRow(
                     valueBoxOutput("total_members"),
                     valueBoxOutput("active_members"),
@@ -351,6 +414,10 @@ ui <- dashboardPage(
                         tabPanel(
                             # NEW: Member Map
                             "Member Map",
+                            download_btn(
+                                "dl_member_coords",
+                                "Download coordinates (CSV)"
+                            ),
                             leafletOutput("member_map", height = "560px")
                         )
                     )
@@ -360,6 +427,7 @@ ui <- dashboardPage(
             ## ---- VISITORS ----
             tabItem(
                 tabName = "visitors",
+                download_btn("dl_visitors", "Download visitor roster"),
                 fluidRow(
                     valueBoxOutput("total_visitors"),
                     valueBoxOutput("active_visitors"),
@@ -390,6 +458,10 @@ ui <- dashboardPage(
                         ),
                         tabPanel(
                             "Visitor Map",
+                            download_btn(
+                                "dl_visitor_coords",
+                                "Download coordinates (CSV)"
+                            ),
                             leafletOutput("visitor_map", height = "560px")
                         ),
                         tabPanel(
@@ -409,17 +481,48 @@ server <- function(input, output, session) {
     raw <- reactiveVal(load_data())
     observeEvent(input$refresh, raw(load_data()))
 
-    # ---- Ledger data with void filtering: now uses is_reversal ----
-    ledger_in_range <- reactive({
-        df <- raw()$ledger |>
+    # ---- Financial ledger vs display ledger ----
+    # Financial calculations MUST include reversal rows so that a void
+    # cancels the original transaction. The display ledger can hide those
+    # reversal rows unless the user explicitly asks to see them.
+    #
+    # `effective_date`: a reversal row is dated whenever it was actually
+    # processed, which is often a different month (even a different
+    # reporting period) than the transaction it cancels. Grouping or
+    # date-filtering by that raw date can separate a void from its
+    # original — one lands inside the selected range, the other doesn't —
+    # leaving a stray, wrongly-signed bar in whichever period the split
+    # half landed in. Pinning a reversal's effective_date back to
+    # `voids_entry_date` (the original entry's date, already exposed by
+    # the view) keeps every void paired with what it cancels, so it nets
+    # to exactly zero regardless of how long after the fact it was voided.
+    financial_activity <- reactive({
+        raw()$ledger |>
+            mutate(effective_date = coalesce(voids_entry_date, entry_date)) |>
+            filter(
+                effective_date >= input$date_range[1],
+                effective_date <= input$date_range[2]
+            )
+    })
+
+    # Plain entry_date filter, deliberately NOT using effective_date — the
+    # raw Ledger table is an audit view, so a reversal should show up on
+    # the date it was actually processed, not the date of what it voided.
+    ledger_display_range <- reactive({
+        raw()$ledger |>
             filter(
                 entry_date >= input$date_range[1],
                 entry_date <= input$date_range[2]
             )
-        # Hide reversal rows unless "Show voided" is checked
+    })
+
+    ledger_in_range <- reactive({
+        df <- ledger_display_range()
+
         if (!isTRUE(input$show_voided)) {
-            df <- df |> filter(!is_reversal) # was !is_voided
+            df <- df |> filter(!is_reversal)
         }
+
         df
     })
 
@@ -473,7 +576,7 @@ server <- function(input, output, session) {
     })
 
     output$total_income <- renderValueBox({
-        v <- ledger_in_range() |>
+        v <- financial_activity() |>
             filter(entry_type == "transaction", flow == "income") |>
             pull(signed_amount) |>
             sum(na.rm = TRUE)
@@ -486,11 +589,10 @@ server <- function(input, output, session) {
     })
 
     output$total_expense <- renderValueBox({
-        v <- ledger_in_range() |>
+        v <- financial_activity() |>
             filter(entry_type == "transaction", flow == "expense") |>
-            pull(signed_amount) |>
-            sum(na.rm = TRUE) |>
-            abs()
+            summarise(total = sum(-signed_amount, na.rm = TRUE)) |>
+            pull(total)
         valueBox(
             dollar(v, prefix = "KES "),
             "Total Expenses",
@@ -500,7 +602,7 @@ server <- function(input, output, session) {
     })
 
     output$net_balance <- renderValueBox({
-        v <- ledger_in_range() |>
+        v <- financial_activity() |>
             filter(entry_type == "transaction") |>
             pull(signed_amount) |>
             sum(na.rm = TRUE)
@@ -513,11 +615,18 @@ server <- function(input, output, session) {
     })
 
     output$monthly_chart <- renderPlotly({
-        monthly <- ledger_in_range() |>
+        monthly <- financial_activity() |>
             filter(entry_type == "transaction") |>
-            mutate(month = floor_date(entry_date, "month")) |>
+            mutate(
+                month = floor_date(effective_date, "month"),
+                amount = case_when(
+                    flow == "income" ~ signed_amount,
+                    flow == "expense" ~ -signed_amount,
+                    TRUE ~ 0
+                )
+            ) |>
             group_by(month, flow) |>
-            summarise(total = sum(abs(signed_amount)), .groups = "drop")
+            summarise(total = sum(amount, na.rm = TRUE), .groups = "drop")
 
         p <- ggplot2::ggplot(
             monthly,
@@ -537,10 +646,14 @@ server <- function(input, output, session) {
     })
 
     output$category_chart <- renderPlotly({
-        by_cat <- ledger_in_range() |>
+        by_cat <- financial_activity() |>
             filter(entry_type == "transaction", flow == "expense") |>
             group_by(category_name) |>
-            summarise(total = sum(abs(signed_amount)), .groups = "drop") |>
+            summarise(
+                total = sum(-signed_amount, na.rm = TRUE),
+                .groups = "drop"
+            ) |>
+            filter(total != 0) |>
             arrange(desc(total))
 
         plot_ly(
@@ -563,10 +676,14 @@ server <- function(input, output, session) {
     })
 
     output$category_chart_income <- renderPlotly({
-        by_cat <- ledger_in_range() |>
+        by_cat <- financial_activity() |>
             filter(entry_type == "transaction", flow == "income") |>
             group_by(category_name) |>
-            summarise(total = sum(abs(signed_amount)), .groups = "drop") |>
+            summarise(
+                total = sum(signed_amount, na.rm = TRUE),
+                .groups = "drop"
+            ) |>
+            filter(total != 0) |>
             arrange(desc(total))
 
         plot_ly(
@@ -587,6 +704,20 @@ server <- function(input, output, session) {
         ) |>
             layout(showlegend = FALSE)
     })
+
+    output$dl_overview <- downloadHandler(
+        filename = function() {
+            paste0("overview_transactions_", Sys.Date(), ".csv")
+        },
+        content = function(file) {
+            write.csv(
+                financial_activity() |> filter(entry_type == "transaction"),
+                file,
+                row.names = FALSE,
+                na = ""
+            )
+        }
+    )
 
     ## ==================== GENERAL LEDGER ====================
 
@@ -615,21 +746,31 @@ server <- function(input, output, session) {
             formatCurrency("signed_amount", currency = "KES ")
     })
 
+    output$dl_ledger <- downloadHandler(
+        filename = function() paste0("ledger_", Sys.Date(), ".csv"),
+        content = function(file) {
+            write.csv(ledger_in_range(), file, row.names = FALSE, na = "")
+        }
+    )
+
     # Contribution history per member — right-joined onto the full member
     # list so members who haven't given anything (yet) still show up with
     # a zero, rather than silently disappearing from the table.
     member_contributions <- reactive({
-        contributions <- raw()$ledger |>
+        contributions <- financial_activity() |>
             filter(
                 entry_type == "transaction",
-                !is_reversal, # was !is_voided
-                flow == "income",
+                category_type == "income",
                 !is.na(member_name)
             ) |>
             group_by(full_name = member_name) |>
             summarise(
-                total_contributed = sum(signed_amount),
-                last_contribution = max(entry_date),
+                total_contributed = sum(signed_amount, na.rm = TRUE),
+                last_contribution = if (any(signed_amount > 0)) {
+                    max(entry_date[signed_amount > 0])
+                } else {
+                    as.Date(NA)
+                },
                 .groups = "drop"
             )
 
@@ -639,11 +780,10 @@ server <- function(input, output, session) {
     })
 
     output$period_contributions <- renderValueBox({
-        v <- ledger_in_range() |>
+        v <- financial_activity() |>
             filter(
                 entry_type == "transaction",
-                flow == "income",
-                !is_reversal, # was !is_voided
+                category_type == "income", # was !is_voided
                 !is.na(member_name)
             ) |>
             pull(signed_amount) |>
@@ -657,14 +797,18 @@ server <- function(input, output, session) {
     })
 
     output$contributing_members <- renderValueBox({
-        v <- ledger_in_range() |>
+        v <- financial_activity() |>
             filter(
                 entry_type == "transaction",
-                flow == "income",
-                !is_reversal, # was !is_voided
+                category_type == "income",
                 !is.na(member_name)
             ) |>
-            distinct(member_name) |>
+            group_by(member_name) |>
+            summarise(
+                net_contribution = sum(signed_amount, na.rm = TRUE),
+                .groups = "drop"
+            ) |>
+            filter(net_contribution > 0) |>
             nrow()
         valueBox(
             v,
@@ -675,17 +819,23 @@ server <- function(input, output, session) {
     })
 
     output$avg_contribution <- renderValueBox({
-        df <- ledger_in_range() |>
+        df <- financial_activity() |>
             filter(
                 entry_type == "transaction",
-                flow == "income",
-                !is_reversal, # was !is_voided
+                category_type == "income",
                 !is.na(member_name)
-            )
-        v <- if (nrow(df) > 0) mean(df$signed_amount) else 0
+            ) |>
+            group_by(member_name) |>
+            summarise(
+                net_contribution = sum(signed_amount, na.rm = TRUE),
+                .groups = "drop"
+            ) |>
+            filter(net_contribution > 0)
+
+        v <- if (nrow(df) > 0) mean(df$net_contribution) else 0
         valueBox(
             dollar(v, prefix = "KES "),
-            "Avg Gift (period)",
+            "Avg Net Gift (period)",
             icon = icon("chart-simple"),
             color = "green"
         )
@@ -732,6 +882,15 @@ server <- function(input, output, session) {
             formatCurrency("total_contributed", currency = "KES ")
     })
 
+    output$dl_contributions <- downloadHandler(
+        filename = function() {
+            paste0("member_contributions_", Sys.Date(), ".csv")
+        },
+        content = function(file) {
+            write.csv(member_contributions(), file, row.names = FALSE, na = "")
+        }
+    )
+
     ## ==================== FUNDS ====================
     # Fund balance is cumulative (all transactions ever, not voided),
     # same logic as account_balances — "current standing", not a
@@ -742,11 +901,13 @@ server <- function(input, output, session) {
         raw()$ledger |>
             filter(
                 entry_type == "transaction",
-                !is_reversal, # was !is_voided
                 !is.na(fund_name)
             ) |>
             group_by(fund = fund_name) |>
-            summarise(balance = sum(signed_amount), .groups = "drop") |>
+            summarise(
+                balance = sum(signed_amount, na.rm = TRUE),
+                .groups = "drop"
+            ) |>
             right_join(raw()$funds_meta, by = "fund") |>
             mutate(balance = coalesce(balance, 0))
     })
@@ -770,10 +931,17 @@ server <- function(input, output, session) {
     })
 
     output$fund_chart <- renderPlotly({
-        fd <- ledger_in_range() |>
+        fd <- financial_activity() |>
             filter(entry_type == "transaction", !is.na(fund_name)) |>
+            mutate(
+                amount = case_when(
+                    flow == "income" ~ signed_amount,
+                    flow == "expense" ~ -signed_amount,
+                    TRUE ~ 0
+                )
+            ) |>
             group_by(fund_name, flow) |>
-            summarise(total = sum(abs(signed_amount)), .groups = "drop")
+            summarise(total = sum(amount, na.rm = TRUE), .groups = "drop")
 
         p <- ggplot2::ggplot(
             fd,
@@ -805,6 +973,13 @@ server <- function(input, output, session) {
             ) |>
             formatCurrency("balance", currency = "KES ")
     })
+
+    output$dl_funds <- downloadHandler(
+        filename = function() paste0("fund_summary_", Sys.Date(), ".csv"),
+        content = function(file) {
+            write.csv(fund_balances(), file, row.names = FALSE, na = "")
+        }
+    )
 
     ## ==================== MEMBERS ====================
     # Demographics only — no money here. See General Ledger > Member
@@ -893,6 +1068,44 @@ server <- function(input, output, session) {
             )
     })
 
+    output$dl_members <- downloadHandler(
+        filename = function() paste0("members_", Sys.Date(), ".csv"),
+        content = function(file) {
+            df <- raw()$members |>
+                select(
+                    full_name,
+                    phone_number,
+                    gender,
+                    general_area,
+                    fellowship_group,
+                    member_status,
+                    baptism_status,
+                    confirmation_status,
+                    is_active
+                ) |>
+                arrange(full_name)
+            write.csv(df, file, row.names = FALSE, na = "")
+        }
+    )
+
+    output$dl_member_coords <- downloadHandler(
+        filename = function() paste0("member_coordinates_", Sys.Date(), ".csv"),
+        content = function(file) {
+            df <- members_with_coords() |>
+                filter(!is.na(lat), !is.na(lng)) |>
+                select(
+                    full_name,
+                    member_status,
+                    gender,
+                    general_area,
+                    fellowship_group,
+                    lat,
+                    lng
+                )
+            write.csv(df, file, row.names = FALSE, na = "")
+        }
+    )
+
     # ---- NEW: Member Map ----
     output$member_map <- renderLeaflet({
         m <- members_with_coords() |>
@@ -934,6 +1147,17 @@ server <- function(input, output, session) {
                 pal = pal,
                 values = names(status_colors),
                 title = "Status"
+            ) |>
+            # Adds a printer-icon control directly on the map — click it to
+            # export the current view as a PNG, entirely in-browser (no
+            # server-side rendering, so no extra system dependencies).
+            addEasyprint(
+                options = easyprintOptions(
+                    exportOnly = TRUE,
+                    filename = paste0("members_map_", Sys.Date()),
+                    hideControlContainer = FALSE,
+                    sizeModes = list("CurrentSize")
+                )
             )
 
         if (nrow(m) == 0) {
@@ -1108,6 +1332,14 @@ server <- function(input, output, session) {
                 pal = pal,
                 values = names(VISITOR_STATUS_COLORS),
                 title = "Status"
+            ) |>
+            addEasyprint(
+                options = easyprintOptions(
+                    exportOnly = TRUE,
+                    filename = paste0("visitors_map_", Sys.Date()),
+                    hideControlContainer = FALSE,
+                    sizeModes = list("CurrentSize")
+                )
             )
 
         if (nrow(v) == 0) {
@@ -1137,6 +1369,45 @@ server <- function(input, output, session) {
                 )
             )
     })
+
+    output$dl_visitors <- downloadHandler(
+        filename = function() paste0("visitors_", Sys.Date(), ".csv"),
+        content = function(file) {
+            df <- raw()$visitors |>
+                select(
+                    full_name,
+                    phone_number,
+                    gender,
+                    general_area,
+                    how_heard,
+                    first_visit_date,
+                    visitor_status,
+                    invited_by
+                ) |>
+                arrange(desc(first_visit_date))
+            write.csv(df, file, row.names = FALSE, na = "")
+        }
+    )
+
+    output$dl_visitor_coords <- downloadHandler(
+        filename = function() {
+            paste0("visitor_coordinates_", Sys.Date(), ".csv")
+        },
+        content = function(file) {
+            df <- visitors_with_coords() |>
+                filter(!is.na(lat), !is.na(lng)) |>
+                select(
+                    full_name,
+                    visitor_status,
+                    gender,
+                    general_area,
+                    how_heard,
+                    lat,
+                    lng
+                )
+            write.csv(df, file, row.names = FALSE, na = "")
+        }
+    )
 
     output$visitors_table <- renderDT({
         raw()$visitors |>

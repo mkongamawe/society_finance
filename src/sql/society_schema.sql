@@ -579,7 +579,10 @@ GROUP BY a.id, a.name, a.opening_balance;
 -- general_ledger: one chronological, read-only view of everything.
 -- is_voided/voided_reason booleans are gone; is_reversal + which
 -- entry a row reverses (voids_entry_date) replace them.
+-- category_type preserves the original income/expense direction on
+-- reversal rows so reporting can net them correctly.
 -- ------------------------------------------------------------
+DROP VIEW IF EXISTS general_ledger;
 CREATE VIEW general_ledger AS
 SELECT * FROM (
     SELECT
@@ -587,6 +590,7 @@ SELECT * FROM (
         t.transaction_date            AS entry_date,
         a.name                        AS account_name,
         c.name                        AS category_name,
+        c.category_type               AS category_type,
         f.name                        AS fund_name,
         mem.full_name                 AS member_name,
         CASE WHEN c.category_type = 'income' THEN t.amount ELSE -t.amount END AS signed_amount,
@@ -611,6 +615,7 @@ SELECT * FROM (
         tr.transfer_date              AS entry_date,
         af.name || ' -> ' || ato.name AS account_name,
         'Transfer'                     AS category_name,
+        'transfer'                     AS category_type,
         NULL                            AS fund_name,
         NULL                            AS member_name,
         tr.amount                      AS signed_amount,

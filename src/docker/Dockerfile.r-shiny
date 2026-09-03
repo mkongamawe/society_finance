@@ -20,6 +20,7 @@ RUN install2.r --error --skipinstalled --ncpus -1 \
       lubridate \
       scales \
       leaflet \
+      leaflet.extras2 \
     && rm -rf /tmp/downloaded_packages
 
 # Shiny Server serves any folder under /srv/shiny-server/ as an app
